@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# Qwen-VL Test Script
+# Usage:
+#   bash scripts/test.sh --gpu 0 --ckpt outputs/my_exp/ckpt/last.ckpt
+#   bash scripts/test.sh --gpu 0 --exp_name pretrained_test
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+GPU_IDS=""
+EXP_NAME="${EXP_NAME:-qwen3vl_finetune}"
+CKPT_PATH="${CKPT_PATH:-}"
+MODEL_PATH="${MODEL_PATH:-./source/Qwen3-VL-4B-Instruct}"
+
+# HuggingFace dataset path
+DATASET_PATH="./source/PortraitCraft_dataset"
+IMAGES_PATH="${DATASET_PATH}"
+
+SEED="${SEED:-42}"
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
+PROMPT_TYPE="${PROMPT_TYPE:-simple}"
+DATASET_TYPE="${DATASET_TYPE:-test}"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --gpu)
+            GPU_IDS="$2"
+            shift 2
+            ;;
+        --exp_name)
+            EXP_NAME="$2"
+            shift 2
+            ;;
+        --ckpt)
+            CKPT_PATH="$2"
+            shift 2
+            ;;
+        --prompt_type)
+            PROMPT_TYPE="$2"
+            shift 2
+            ;;
+        --dataset_type)
+            DATASET_TYPE="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Set GPU
+if [ -n "$GPU_IDS" ]; then
+    export CUDA_VISIBLE_DEVICES="$GPU_IDS"
+    echo "Using GPUs: $GPU_IDS"
+fi
+
+eval "$(conda shell.bash hook)"
+conda activate craft
+
+if [ -n "$CKPT_PATH" ]; then
+    echo "Testing fine-tuned model from: $CKPT_PATH"
+    echo "Prompt type: $PROMPT_TYPE"
+    echo "Dataset type: $DATASET_TYPE"
+    python test.py \
+        --ckpt "${CKPT_PATH}" \
+        --images_path "${IMAGES_PATH}" \
+        --seed ${SEED} \
+        --max_new_tokens ${MAX_NEW_TOKENS} \
+        --prompt_type ${PROMPT_TYPE} \
+        --dataset_type ${DATASET_TYPE}
+else
+    echo "Testing pretrained model"
+    echo "Prompt type: $PROMPT_TYPE"
+    echo "Dataset type: $DATASET_TYPE"
+    python test.py \
+        --exp_name "${EXP_NAME}" \
+        --model_name_or_path "${MODEL_PATH}" \
+        --images_path "${IMAGES_PATH}" \
+        --seed ${SEED} \
+        --max_new_tokens ${MAX_NEW_TOKENS} \
+        --prompt_type ${PROMPT_TYPE} \
+        --dataset_type ${DATASET_TYPE}
+fi

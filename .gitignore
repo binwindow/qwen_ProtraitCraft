@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Checkpoints and outputs
+*.ckpt
+*.pt
+*.pth
+outputs/
+wandb/
+swanlab/
+*.log
+logs/
+
+# Python
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+venv/
+.env.local
+
+# Large model files
+*.bin
+*.safetensors
+source/
+.huggingface/
+
+# Mac
+.DS_Store

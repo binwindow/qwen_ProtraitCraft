@@ -1,0 +1,22 @@
+# Qwen-VL Fine-tuning Requirements
+
+# Core
+torch>=2.0.0
+transformers>=4.40.0
+peft>=0.10.0
+accelerate>=0.25.0
+datasets>=2.18.0
+
+# Flash Attention
+flash-attn>=2.5.0
+
+# Logging
+swanlab>=0.1.0
+
+# Data processing
+pillow>=10.0.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Visualization
+matplotlib>=3.7.0
