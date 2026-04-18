@@ -111,7 +111,7 @@ def load_model(
 
     if gradient_checkpointing:
         # Enable gradient checkpointing for memory efficiency
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        model.gradient_checkpointing_enable()
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
         else:
