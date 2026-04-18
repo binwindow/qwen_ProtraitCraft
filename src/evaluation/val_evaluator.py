@@ -72,8 +72,8 @@ class ValidationEvaluator:
         criteria = item.get("criteria", {})
 
         criteria_text = "\n".join([
-            f"{k}: level={v['level']}"
-            for k, v in criteria.items()
+            f"{k}: level=x"
+            for k in criteria
         ])
 
         prompt = f"""
