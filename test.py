@@ -165,6 +165,12 @@ def build_prompt(item, prompt_type="simple", dataset_type="test"):
 
     if prompt_type == "enhanced":
         criteria_text = _build_enhanced_criteria_text()
+    elif dataset_type == "val":
+        # Val dataset: use placeholder x to avoid leaking ground truth labels
+        criteria_text = "\n".join([
+            f"{k}: level=x"
+            for k in criteria
+        ])
     else:
         criteria_text = "\n".join([
             f"{k}: level={v['level']}"
