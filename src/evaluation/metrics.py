@@ -65,8 +65,8 @@ def compute_correlation_metrics(gt_data, pred_data):
     level_acc = level_correct / level_total if level_total > 0 else 0.0
 
     return {
-        "srcc": float(srcc) if not np.isnan(srcc) else 0.0,
-        "plcc": float(plcc) if not np.isnan(plcc) else 0.0,
+        "srcc": float(srcc) if not np.isnan(srcc) else -1.0,
+        "plcc": float(plcc) if not np.isnan(plcc) else -1.0,
         "level_acc": level_acc,
         "num_samples": num_samples,
     }
@@ -156,8 +156,8 @@ def evaluate_and_save(input_json, pred_json):
     qa_acc = qa_correct / qa_total if qa_total > 0 else 0.0
 
     metrics = {
-        "srcc": srcc if not np.isnan(srcc) else 0.0,
-        "plcc": plcc if not np.isnan(plcc) else 0.0,
+        "srcc": srcc if not np.isnan(srcc) else -1.0,
+        "plcc": plcc if not np.isnan(plcc) else -1.0,
         "level_acc": level_acc,
         "qa_acc": qa_acc,
         "num_samples": num_samples,

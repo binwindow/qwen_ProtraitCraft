@@ -158,11 +158,11 @@ class LoggerManager:
         if self.swanlab_logger:
             self.swanlab_logger.init(config)
 
-    def log_train(self, metrics: Dict[str, Any], step: Optional[int] = None, epoch: Optional[int] = None):
+    def log_train(self, metrics: Dict[str, Any], step: Optional[int] = None, epoch: Optional[int] = None, console: bool = True):
         self.train_logger.log(metrics, step=step, epoch=epoch)
         if self.swanlab_logger:
             self.swanlab_logger.log(metrics, step=step)
-        if step is not None:
+        if console and step is not None:
             step_str = f"{step // 1000}K" if step >= 1000 else str(step)
             metrics_str = " | ".join([
                 f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}"
