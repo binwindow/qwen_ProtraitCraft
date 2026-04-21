@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
             NUM_EPOCHS="$2"
             shift 2
             ;;
-        --grad_accum)
+        --grad_accum|--acc)
             GRAD_ACCUM_STEPS="$2"
             shift 2
             ;;

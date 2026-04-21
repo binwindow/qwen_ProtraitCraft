@@ -533,9 +533,12 @@ def main():
                 parsed = extract_json(raw)
 
                 if parsed:
+                    total_score = parsed.get("total_score")
+                    if isinstance(total_score, str):
+                        total_score = int(total_score)
                     record = {
                         "image_path": item["image_path"],
-                        "total_score": parsed.get("total_score"),
+                        "total_score": total_score,
                         "criteria": convert_criteria_to_submission_format(parsed.get("criteria")),
                     }
                     if args.dataset_type == "test":
