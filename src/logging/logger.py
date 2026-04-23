@@ -15,6 +15,15 @@ from typing import Any, Dict, Optional
 class SwanLabLogger:
     """SwanLab logger with wandb-compatible interface."""
 
+    def _is_main_process(self):
+        """Check if this is the main process (rank 0)."""
+        import torch.distributed as dist
+        if not dist.is_available():
+            return True
+        if not dist.is_initialized():
+            return True
+        return dist.get_rank() == 0
+
     def __init__(self, exp_name: str, config: Optional[Dict] = None, log_dir: str = "./logs"):
         self.exp_name = exp_name
         self.log_dir = log_dir
@@ -28,7 +37,8 @@ class SwanLabLogger:
             self.run = swanlab
             self.enabled = True
         except ImportError:
-            print("[Logger] swanlab not installed, using fallback logger")
+            if self._is_main_process():
+                print("[Logger] swanlab not installed, using fallback logger")
             self.enabled = False
 
     def init(self, config: Optional[Dict] = None):
@@ -40,6 +50,8 @@ class SwanLabLogger:
             )
 
     def log(self, metrics: Dict[str, Any], step: Optional[int] = None):
+        if not self._is_main_process():
+            return
         if self.enabled and self.run is not None:
             if step is not None:
                 self.run.log(metrics, step=step)
@@ -62,7 +74,20 @@ class JSONLogger:
         self.log_file = log_file
         os.makedirs(os.path.dirname(log_file) if os.path.dirname(log_file) else ".", exist_ok=True)
 
+    def _is_main_process(self):
+        """Check if this is the main process (rank 0)."""
+        import torch.distributed as dist
+        if not dist.is_available():
+            return True
+        if not dist.is_initialized():
+            return True
+        return dist.get_rank() == 0
+
     def log(self, metrics: Dict[str, Any], step: Optional[int] = None, epoch: Optional[int] = None):
+        # Only log on main process to avoid duplicate entries
+        if not self._is_main_process():
+            return
+
         entry = {"timestamp": datetime.now().isoformat()}
         if step is not None:
             entry["step"] = step

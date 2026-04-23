@@ -1,19 +1,50 @@
 """
 Validation Evaluator for PortraitCraft
 Similar to test.py evaluation logic, but for training validation
+Supports multi-GPU evaluation with temp file merging
 """
 import json
 import os
 from PIL import Image
+import glob
 
 import torch
 from tqdm import tqdm
+from torch.distributed import is_available, is_initialized, get_rank, get_world_size
 
 from .metrics import compute_correlation_metrics
 
 
+def _is_distributed():
+    """Check if distributed training is available and initialized."""
+    return is_available() and is_initialized()
+
+
+def _is_main_process():
+    """Check if this is the main process (rank 0)."""
+    if not is_available():
+        return True
+    if not is_initialized():
+        return True
+    return get_rank() == 0
+
+
+def _get_rank():
+    """Get current process rank."""
+    if not is_available() or not is_initialized():
+        return 0
+    return get_rank()
+
+
+def _get_world_size():
+    """Get total number of processes."""
+    if not is_available() or not is_initialized():
+        return 1
+    return get_world_size()
+
+
 class ValidationEvaluator:
-    """Validation evaluator with model inference."""
+    """Validation evaluator with model inference and multi-GPU support."""
 
     def __init__(
         self,
@@ -162,20 +193,12 @@ Return ONLY valid JSON. No explanation. No markdown.
 
         return converted
 
-    @torch.no_grad()
-    def run_validation(self, epoch: int = None) -> dict:
-        """Run validation on val set and compute metrics."""
-        if not os.path.exists(self.val_json_path):
-            return {"srcc": 0.0, "plcc": 0.0, "level_acc": 0.0, "val_loss": 0.0}
-
-        with open(self.val_json_path, "r", encoding="utf-8") as f:
-            val_data = json.load(f)
-
-        val_data = val_data[:self.max_samples]
-
+    def _process_chunk(self, data_chunk):
+        """Process a chunk of validation data and return results."""
         results = []
-
-        for item in tqdm(val_data, desc="Validation inference"):
+        # Only show tqdm on main process, disable on other ranks
+        show_progress = _is_main_process()
+        for item in tqdm(data_chunk, desc=f"Val", leave=False, disable=not show_progress):
             image_path = self.find_image(item["image_path"])
 
             if not image_path:
@@ -196,22 +219,118 @@ Return ONLY valid JSON. No explanation. No markdown.
                         ),
                     }
                     results.append(record)
-                else:
-                    print(f"[WARN] Failed to extract JSON from: {raw[:200] if raw else 'empty'}")
             except Exception as e:
                 print(f"[ERROR] Inference failed for {item['image_path']}: {e}")
                 continue
 
-        metrics = compute_correlation_metrics(val_data, results)
+        return results
 
-        # Save validation results
-        if self.save_dir is not None and epoch is not None:
-            os.makedirs(self.save_dir, exist_ok=True)
-            save_path = os.path.join(self.save_dir, f"val_{epoch}.json")
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
+    def _save_temp_results(self, results, step):
+        """Save temp results to temp_{rank}_{step}.json."""
+        if self.save_dir is None:
+            return None
+        os.makedirs(self.save_dir, exist_ok=True)
+        temp_path = os.path.join(self.save_dir, f"temp_{_get_rank()}_{step}.json")
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        return temp_path
 
-        return metrics
+    def _merge_temp_results(self, step):
+        """Merge all temp files and return combined results."""
+        if self.save_dir is None:
+            return []
+        pattern = os.path.join(self.save_dir, f"temp_*_{step}.json")
+        temp_files = glob.glob(pattern)
+
+        unique = {}
+        for f in temp_files:
+            try:
+                with open(f, "r", encoding="utf-8") as fp:
+                    for x in json.load(fp):
+                        unique[x["image_path"]] = x
+            except Exception as e:
+                print(f"[WARN] Failed to load {f}: {e}")
+                continue
+
+        return list(unique.values())
+
+    def _cleanup_temp_files(self, step):
+        """Delete all temp files for given step."""
+        if self.save_dir is None:
+            return
+        pattern = os.path.join(self.save_dir, f"temp_*_{step}.json")
+        temp_files = glob.glob(pattern)
+        for f in temp_files:
+            try:
+                os.remove(f)
+            except Exception as e:
+                print(f"[WARN] Failed to remove {f}: {e}")
+
+    @torch.no_grad()
+    def run_validation(self, epoch: int = None) -> dict:
+        """Run validation on val set and compute metrics."""
+        if not os.path.exists(self.val_json_path):
+            return {"srcc": 0.0, "plcc": 0.0, "level_acc": 0.0, "val_loss": 0.0}
+
+        with open(self.val_json_path, "r", encoding="utf-8") as f:
+            val_data = json.load(f)
+
+        val_data = val_data[:self.max_samples]
+
+        # Multi-GPU evaluation
+        world_size = _get_world_size()
+        rank = _get_rank()
+        is_dist = _is_distributed()
+
+        if is_dist and world_size > 1:
+            # Split data among GPUs (stride pattern for balanced load)
+            data_chunk = val_data[rank::world_size]
+
+            # Each process its own chunk
+            results = self._process_chunk(data_chunk)
+
+            # Save temp file
+            self._save_temp_results(results, epoch)
+
+            # Barrier: wait for all processes to finish saving
+            torch.distributed.barrier()
+
+            # Main process merges results
+            if _is_main_process():
+                merged_results = self._merge_temp_results(epoch)
+                metrics = compute_correlation_metrics(val_data, merged_results)
+
+                # Save merged results
+                if self.save_dir is not None and epoch is not None:
+                    os.makedirs(self.save_dir, exist_ok=True)
+                    save_path = os.path.join(self.save_dir, f"val_{epoch}.json")
+                    with open(save_path, "w", encoding="utf-8") as f:
+                        json.dump(merged_results, f, ensure_ascii=False, indent=2)
+
+                # Cleanup temp files
+                self._cleanup_temp_files(epoch)
+
+            # Barrier: wait for main process to finish merging
+            torch.distributed.barrier()
+
+            if _is_main_process():
+                return metrics
+            else:
+                return {"srcc": 0.0, "plcc": 0.0, "level_acc": 0.0}
+        else:
+            # Single GPU / non-distributed: original logic
+            results = self._process_chunk(val_data)
+
+            metrics = compute_correlation_metrics(val_data, results)
+
+            # Save validation results
+            if self.save_dir is not None and epoch is not None:
+                os.makedirs(self.save_dir, exist_ok=True)
+                save_path = os.path.join(self.save_dir, f"val_{epoch}.json")
+                with open(save_path, "w", encoding="utf-8") as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
+
+            return metrics
 
     def _infer_one(self, image_path, prompt):
         """Run inference on single image."""
@@ -238,9 +357,7 @@ Return ONLY valid JSON. No explanation. No markdown.
         generated_ids = self.model.generate(
             **inputs,
             max_new_tokens=self.max_new_tokens,
-            do_sample=True,
-            temperature=self.temperature,
-            top_p=self.top_p
+            do_sample=False,
         )
 
         output = self.processor.batch_decode(

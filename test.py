@@ -124,6 +124,8 @@ def parse_args():
     parser.add_argument("--dataset_type", type=str, default="test",
                         choices=["test", "val"],
                         help="Dataset type: test (with question/options) or val (criteria only)")
+    parser.add_argument("--metrics_max_samples", type=int, default=None,
+                        help="Limit samples for metrics computation (None = all)")
 
     args = parser.parse_args()
     return args
@@ -372,7 +374,8 @@ def save_results(results, output_json):
 class DemoServer:
     """Model inference server."""
 
-    def __init__(self, model_path, device, max_new_tokens=512, temperature=0.2, top_p=0.9):
+    def __init__(self, model_path, device, max_new_tokens=512, temperature=0.2, top_p=0.9,
+                 lora_enable=False, base_model_path=None):
         print(f"Loading model on {device}...")
 
         self.device = device
@@ -380,12 +383,29 @@ class DemoServer:
         self.temperature = temperature
         self.top_p = top_p
 
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-        ).to(device)
+        torch_dtype = torch.float16 if device.type == "cuda" else torch.float32
 
-        self.processor = AutoProcessor.from_pretrained(model_path)
+        if lora_enable and base_model_path:
+            # Load base model and merge LoRA adapter
+            from peft import PeftModel
+            print(f"Loading LoRA adapter from: {model_path}")
+            print(f"Loading base model from: {base_model_path}")
+
+            base_model = AutoModelForImageTextToText.from_pretrained(
+                base_model_path,
+                torch_dtype=torch_dtype,
+            )
+            self.model = PeftModel.from_pretrained(base_model, model_path)
+            self.model = self.model.merge_and_unload()
+            self.model.to(device)
+            self.processor = AutoProcessor.from_pretrained(base_model_path)
+            print(f"LoRA model merged and loaded successfully")
+        else:
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                model_path,
+                torch_dtype=torch_dtype,
+            ).to(device)
+            self.processor = AutoProcessor.from_pretrained(model_path)
 
         print(f"Model loaded successfully")
 
@@ -474,17 +494,49 @@ def main():
         model_path = args.ckpt
         print(f"Auto-detected exp_name: {exp_name} from ckpt path")
         print(f"Loading fine-tuned model from: {model_path}")
+
+        # Load experiment config to check if LoRA was used
+        config_path = os.path.join(args.save_dir, exp_name, "log", "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                exp_config = json.load(f)
+            lora_enable = exp_config.get("lora_enable", False)
+            base_model_path = exp_config.get("model_name_or_path", args.model_name_or_path)
+            print(f"Experiment config loaded: lora_enable={lora_enable}")
+        else:
+            lora_enable = False
+            base_model_path = args.model_name_or_path
+            print(f"Config not found at {config_path}, assuming non-LoRA")
     else:
         exp_name = args.exp_name or "pretrained_test"
         model_path = args.model_name_or_path
+        lora_enable = False
+        base_model_path = args.model_name_or_path
         print(f"Testing pretrained model: {model_path}")
 
     test_dir = os.path.join(args.save_dir, exp_name, "test")
     os.makedirs(test_dir, exist_ok=True)
 
-    output_json = args.output_json
-    if not os.path.isabs(output_json):
-        output_json = os.path.join(test_dir, output_json)
+    # Determine output filename based on dataset_type and ckpt info
+    if args.output_json == "test_results.json":
+        # Get checkpoint name for inclusion in output file
+        ckpt_name = ""
+        if args.ckpt:
+            ckpt_name = os.path.basename(args.ckpt)  # e.g., checkpoint-6500-srcc0.3371
+
+        if args.dataset_type == "val":
+            base_name = "val_results"
+        else:
+            base_name = "test_results"
+
+        if ckpt_name:
+            output_json = os.path.join(test_dir, f"{base_name}_{ckpt_name}.json")
+        else:
+            output_json = os.path.join(test_dir, f"{base_name}.json")
+    else:
+        output_json = args.output_json
+        if not os.path.isabs(output_json):
+            output_json = os.path.join(test_dir, output_json)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -508,6 +560,8 @@ def main():
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
+            lora_enable=lora_enable,
+            base_model_path=base_model_path,
         )
 
         results = []
@@ -557,20 +611,33 @@ def main():
         print(f"\nInference completed!")
         print(f"Total processed: {len(results)}/{len(test_data)}")
 
-    # Compute metrics after all samples are done
-    print("\nComputing metrics...")
-    metrics = evaluate_and_save(
-        input_json=args.input_json,
-        pred_json=output_json,
-    )
+    # Compute metrics only for val dataset (test dataset has no ground truth for comparison)
+    if args.dataset_type == "val":
+        print("\nComputing metrics...")
 
-    print("\n=== Test Metrics ===")
-    print(f"SRCC (Spearman):    {metrics['srcc']:.4f}")
-    print(f"PLCC (Pearson):     {metrics['plcc']:.4f}")
-    print(f"Level Acc:          {metrics['level_acc']:.4f}")
-    print(f"QA Acc:             {metrics['qa_acc']:.4f}")
-    print(f"Samples:            {metrics['num_samples']}/{metrics['num_total']}")
-    print(f"Metrics saved to:   {os.path.join(os.path.dirname(output_json), 'test_metrics.json')}")
+        # Build metrics filename with same ckpt info as results file
+        ckpt_name = os.path.basename(args.ckpt) if args.ckpt else ""
+        if ckpt_name:
+            metrics_file = os.path.join(os.path.dirname(output_json), f"val_metrics_{ckpt_name}.json")
+        else:
+            metrics_file = os.path.join(os.path.dirname(output_json), "val_metrics.json")
+
+        metrics = evaluate_and_save(
+            input_json=args.input_json,
+            pred_json=output_json,
+            metrics_path=metrics_file,
+            max_samples=args.metrics_max_samples,
+        )
+
+        print("\n=== Test Metrics ===")
+        print(f"SRCC (Spearman):    {metrics['srcc']:.4f}")
+        print(f"PLCC (Pearson):     {metrics['plcc']:.4f}")
+        print(f"Level Acc:          {metrics['level_acc']:.4f}")
+        print(f"QA Acc:             {metrics['qa_acc']:.4f}")
+        print(f"Samples:            {metrics['num_samples']}/{metrics['num_total']}")
+        print(f"Metrics saved to:   {metrics_file}")
+    else:
+        print(f"\nResults saved to: {output_json}")
 
 
 if __name__ == "__main__":

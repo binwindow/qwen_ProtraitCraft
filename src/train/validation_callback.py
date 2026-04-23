@@ -12,6 +12,16 @@ from ..evaluation.val_evaluator import ValidationEvaluator
 from ..logging.logger import LoggerManager
 
 
+def _is_main_process():
+    """Check if this is the main process (rank 0)."""
+    import torch.distributed as dist
+    if not dist.is_available():
+        return True
+    if not dist.is_initialized():
+        return True
+    return dist.get_rank() == 0
+
+
 class ValidationAndCheckpointCallback(TrainerCallback):
     """Run validation and save checkpoint with metrics in one callback."""
 
@@ -71,6 +81,10 @@ class ValidationAndCheckpointCallback(TrainerCallback):
         if not os.path.exists(self.output_dir):
             return
 
+        # Only main process should manage checkpoints
+        if not _is_main_process():
+            return
+
         pattern = rf"checkpoint-(\d+)-{re.escape(self.metric_for_best_model)}([+-]?[\d.]+)"
         for ckpt_dir in os.listdir(self.output_dir):
             match = re.match(pattern, ckpt_dir)
@@ -79,7 +93,8 @@ class ValidationAndCheckpointCallback(TrainerCallback):
                 metric_value = float(match.group(2))
                 ckpt_path = os.path.join(self.output_dir, ckpt_dir)
                 self.best_checkpoints.append((metric_value, ckpt_path, step))
-                print(f"Loaded existing checkpoint for top-k: {ckpt_dir}")
+                if _is_main_process():
+                    print(f"Loaded existing checkpoint for top-k: {ckpt_dir}")
 
         # Sort by metric and keep top_k + 1 (for latest)
         self.best_checkpoints.sort(key=lambda x: x[0], reverse=True)
@@ -102,7 +117,8 @@ class ValidationAndCheckpointCallback(TrainerCallback):
                 if os.path.exists(path):
                     import shutil
                     shutil.rmtree(path)
-                    print(f"Removed excess checkpoint: {path}")
+                    if _is_main_process():
+                        print(f"Removed excess checkpoint: {path}")
 
     def on_log(self, args, state, control, **kwargs):
         """Log training metrics."""
@@ -119,32 +135,34 @@ class ValidationAndCheckpointCallback(TrainerCallback):
     ):
         """Run validation and save checkpoint at configured step intervals."""
         if self.eval_steps > 0 and state.global_step % self.eval_steps == 0:
-
             from ..train.trainer_patch import restore_original_attention_class, replace_qwen2_vl_attention_class
             restore_original_attention_class()
 
+            # All processes run validation (val_evaluator handles multi-GPU splitting)
             metrics = self.validator.run_validation(epoch=state.global_step)
 
             # Reapply flash attention after validation
             replace_qwen2_vl_attention_class()
 
-            # Log validation metrics
-            self.logger_manager.log_val(metrics, step=state.global_step, epoch=state.epoch)
+            # Only main process logs metrics and saves checkpoint
+            if state.is_world_process_zero:
+                # Log validation metrics
+                self.logger_manager.log_val(metrics, step=state.global_step, epoch=state.epoch)
 
-            # 2. Immediately save checkpoint with metrics
-            metric_value = metrics.get(self.metric_for_best_model)
-            if metric_value is not None:
-                step = state.global_step
-                new_name = f"checkpoint-{step}-{self.metric_for_best_model}{metric_value:.4f}"
-                new_dir = os.path.join(self.output_dir, new_name)
+                # 2. Immediately save checkpoint with metrics
+                metric_value = metrics.get(self.metric_for_best_model)
+                if metric_value is not None:
+                    step = state.global_step
+                    new_name = f"checkpoint-{step}-{self.metric_for_best_model}{metric_value:.4f}"
+                    new_dir = os.path.join(self.output_dir, new_name)
 
-                # Save model (similar to safe_save_model_for_hf_trainer)
-                self._save_model(new_dir)
+                    # Save model (similar to safe_save_model_for_hf_trainer)
+                    self._save_model(new_dir)
 
-                print(f"Checkpoint saved: {new_name}/")
+                    print(f"Checkpoint saved: {new_name}/")
 
-                # 3. Manage top-k and last checkpoint
-                self.best_checkpoints.append((metric_value, new_dir, step))
+                    # 3. Manage top-k and last checkpoint
+                    self.best_checkpoints.append((metric_value, new_dir, step))
                 self.best_checkpoints.sort(key=lambda x: x[0], reverse=True)
 
                 # Keep top_k + 1 (the +1 is for last checkpoint which is also the latest)
@@ -185,13 +203,17 @@ class ValidationAndCheckpointCallback(TrainerCallback):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        # Use trainer's _save method which handles model + config
-        self.trainer._save(save_dir, state_dict=None)
-
-        # Save optimizer, scheduler, rng_state via trainer methods
-        self.trainer._save_optimizer_and_scheduler(save_dir)
-        self.trainer._save_rng_state(save_dir)
-        self.trainer.state.save_to_json(os.path.join(save_dir, "trainer_state.json"))
+        # Handle deepspeed vs normal training
+        if hasattr(self.trainer, 'deepspeed') and self.trainer.deepspeed:
+            # DeepSpeed: use save_model which handles ZeRO correctly
+            self.trainer.save_model(save_dir)
+        else:
+            # Normal training: use _save method
+            self.trainer._save(save_dir, state_dict=None)
+            # Save optimizer, scheduler, rng_state via trainer methods
+            self.trainer._save_optimizer_and_scheduler(save_dir)
+            self.trainer._save_rng_state(save_dir)
+            self.trainer.state.save_to_json(os.path.join(save_dir, "trainer_state.json"))
 
         # Save processor/tokenizer files
         self.trainer.processing_class.save_pretrained(save_dir)

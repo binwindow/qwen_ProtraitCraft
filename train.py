@@ -20,6 +20,7 @@ from src.train.validation_callback import ValidationAndCheckpointCallback
 from src.train.logging_callback import LoggingCallback
 from src.data import make_supervised_data_module
 from src.logging.logger import LoggerManager
+from src.utils.experiment import save_exp_config, is_main_process
 
 
 @dataclass
@@ -97,6 +98,9 @@ def train():
     for d in [ckpt_dir, log_dir, samples_dir, plt_fig_dir, test_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
+    # Save experiment config to log_dir
+    save_exp_config(exp_name, str(log_dir), model_args, data_args, training_args)
+
     # Trainer saves checkpoints to ckpt_dir
     training_args.output_dir = str(ckpt_dir)
 
@@ -150,7 +154,8 @@ def train():
         )
         model_type = "qwen2vl"
 
-    print(f'Loaded model: {model_path}, class: {model.__class__.__name__}')
+    if is_main_process():
+        print(f'Loaded model: {model_path}, class: {model.__class__.__name__}')
     model.config.use_cache = False
 
     # Gradient checkpointing (same as upstream)
@@ -175,7 +180,8 @@ def train():
     # LoRA setup (same as upstream)
     if training_args.lora_enable:
         from peft import LoraConfig, get_peft_model, TaskType
-        print("LoRA enabled")
+        if is_main_process():
+            print("LoRA enabled")
 
         for p in model.parameters():
             p.requires_grad = False
@@ -246,10 +252,16 @@ def train():
             # Get the checkpoint with highest step
             latest_ckpt = max(checkpoints, key=lambda p: int(p.name.split("-")[1]))
             resume_from = str(latest_ckpt)
-            print(f"Found checkpoint to resume: {resume_from}")
+            if is_main_process():
+                print(f"Found checkpoint to resume: {resume_from}")
 
     # Train
     trainer.train(resume_from_checkpoint=resume_from)
+
+    # Save final model (only on main process)
+    if is_main_process():
+        safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
+
     trainer.save_state()
 
 

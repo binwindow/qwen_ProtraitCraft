@@ -72,13 +72,15 @@ def compute_correlation_metrics(gt_data, pred_data):
     }
 
 
-def evaluate_and_save(input_json, pred_json):
+def evaluate_and_save(input_json, pred_json, metrics_path=None, max_samples=None):
     """
     Evaluate prediction results against ground truth.
 
     Args:
         input_json: Path to ground truth JSON
         pred_json: Path to prediction JSON
+        metrics_path: Optional path for metrics output (auto-detected if None)
+        max_samples: Optional limit on number of samples to evaluate
 
     Returns:
         dict with srcc, plcc, level_acc, qa_acc, num_samples, num_total
@@ -117,6 +119,10 @@ def evaluate_and_save(input_json, pred_json):
 
         pred_item = pred_map[img_path]
         num_samples += 1
+
+        # Limit samples if max_samples is set
+        if max_samples is not None and num_samples >= max_samples:
+            break
 
         gt_score = gt_item.get("total_score", 0)
         pred_score = pred_item.get("total_score", 0)
@@ -165,8 +171,27 @@ def evaluate_and_save(input_json, pred_json):
     }
 
     output_dir = os.path.dirname(pred_json)
-    metrics_path = os.path.join(output_dir, "test_metrics.json")
+    if metrics_path is None:
+        metrics_path = os.path.join(output_dir, "test_metrics.json")
+    os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+
+    # Append to existing metrics file (as list) or create new
+    if os.path.exists(metrics_path):
+        with open(metrics_path, "r", encoding="utf-8") as f:
+            metrics_list = json.load(f)
+        if not isinstance(metrics_list, list):
+            metrics_list = [metrics_list]
+    else:
+        metrics_list = []
+
+    # Add timestamp and max_samples info
+    from datetime import datetime
+    metrics["timestamp"] = datetime.now().isoformat()
+    metrics["max_samples_used"] = max_samples if max_samples else num_samples
+
+    metrics_list.append(metrics)
+
     with open(metrics_path, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2)
+        json.dump(metrics_list, f, indent=2)
 
     return metrics
